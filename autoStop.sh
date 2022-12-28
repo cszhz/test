@@ -3,9 +3,18 @@
 set -e
 
 threshold=0.1
-
 count=0
 wait_minutes=5
+
+
+pseudopid="`pgrep -f $0 -l`"
+actualpid="$(echo "$pseudopid" | grep -v 'sudo' | awk -F ' ' '{print $1}')"
+
+if [[ `echo $actualpid` != "$$" ]]; then
+    echo "Another instance of shell already exist! Exiting"
+    exit
+fi
+
 while true
 do
 
@@ -25,7 +34,6 @@ do
   then
     echo Shutting down
     # wait a little bit more before actually pulling the plug
-    #sleep 300
     sudo poweroff
   fi
 
