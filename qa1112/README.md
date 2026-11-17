@@ -66,8 +66,7 @@ out = pl.pallas_call(
 TPU 上实测（2026-11-17，v6e，JAX 0.11.2 / libtpu 0.0.50）：
 - 运行时下标的 host DMA 以对齐块为单位：host 数组行宽为 4 KiB 的整数倍，一次取对齐的 8 行（一个 `(8,128)` tile 的高度），
   即每块 8 行 × 4 KiB = 32 KiB。
-- 0.5 GiB 的表（f32 `[*, 1024]`）里乱序取 2048 块，结果正确，**2.40 ms、约 28 GB/s、0.85 M 块/s**；块 64 KiB 时同样约 28 GB/s。
-  v6e 每颗芯片的 PCIe 约 32 GB/s 单向。
+- 0.5 GiB 的表（f32 `[*, 1024]`）里乱序取 2048 块，与 numpy 按同样下标取的结果逐位一致。
 
 ---
 
@@ -99,8 +98,7 @@ $PY check_cpp_vs_jax.py
 
 TPU 上实测（2026-11-17，v6e 单芯片，日志在 `runlogs/`）：
 - Python：jit / AOT（`lower().compile()`）/ 反序列化 `Exported.call` 三者输出逐位相同（max|err| = 0）。
-- C++：PJRT C API 0.116，编译 StableHLO 约 380–395 ms（每次启动都要编），第一次执行 3–8 ms（含启动开销），
-  输出 `bf16[4096,1024]`，mean|y| = 0.2622；`check_cpp_vs_jax.py` 用逐位相同的输入在 JAX 里跑同一模型，mean|y| 也是 0.2622。
+- C++：PJRT C API 0.116，编译并执行导出的 StableHLO，输出 `bf16[4096,1024]`，mean|y| = 0.2622；`check_cpp_vs_jax.py` 用逐位相同的输入在 JAX 里跑同一模型，mean|y| 也是 0.2622。
   C++ 只打印 mean|y|，没有逐元素比对。
 
 **要点**
