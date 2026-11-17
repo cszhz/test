@@ -26,30 +26,11 @@ TPU 上实测（2026-11-17，v6e，JAX 0.11.2 / libtpu 0.0.50）：
 - 运行时下标的 host DMA 以对齐块为单位：host 数组行宽为 4 KiB 的整数倍，一次取对齐的 8 行（一个 `(8,128)` tile 的高度），
   即每块 8 行 × 4 KiB = 32 KiB。
 - 0.5 GiB 的表（f32 `[*, 1024]`）里乱序取 2048 块，结果正确，**2.40 ms、约 28 GB/s、0.85 M 块/s**；块 64 KiB 时同样约 28 GB/s。
-  v6e 每颗芯片的 PCIe 约 32 GB/s 单向（知识库 `wiki/concepts/pcie.md`），已接近带宽上限。
-
-**结论**
-1. **TPU 能直接 DMA pinned host 内存（对应 CUDA zero-copy）**：Pallas 对 TensorCore kernel 开放了 `pl.HOST` 内存空间
-   （lowering 为 `#tpu.memory_space<host>`），TPU 的 DMA 引擎经 PCIe 直接读 host 内存、不经过 CPU。区别是 GPU 用 load 指令逐元素读，
-   TPU 按块发 DMA（见上：8 行 × 4 KiB 对齐块），要保持足够多的 DMA 在途，表按这个粒度组织。
-2. **SparseCore 不能直接读 host 内存**：Pallas 的 SparseCore lowering（`sc_lowering.py` / `sc_core.py`）没有 host 内存空间。
-   SparseCore 的乱序 gather（`pl.Indirect`，见 `/zzlfs/ds41flash/tools/sc_big_table_gather_example.py`）只适用于 HBM 里的表，
-   适合放 5–10% 的热点部分。
-3. **推荐的分层做法**：热点行放 HBM（SparseCore 或 XLA gather）；冷行放 host pinned 内存，用上面的 TensorCore host-DMA kernel 取；
-   下标在 step 开始前就已知，可以提前一步把冷行 DMA 到 HBM 的 staging 区，和计算重叠，把 PCIe 延迟藏起来。
-4. **现成 embedding 库的 CPU 瓶颈**：TPU embedding 栈（SparseCore embedding）在 host 上做输入预处理（按 SparseCore 分片、排序、去重），
-   这是设计如此，不是可配置项。绕开的办法：用上面的 Pallas kernel 自己做 gather；或把预处理放到多线程 / 流水线里与设备计算重叠。
-5. **词表会变**：现成库要求表大小固定。做法是预分配固定容量的表（留余量），维护 ID → 槽位的动态映射（host 上的哈希表，或设备上
-   用 Pallas 实现），新 ID 分配空槽、满了按策略淘汰；容量不够时离线扩容。DeepSeek Engram 用 n-gram 哈希映射到固定大小的表，是同一思路。
-6. **`SparseDenseMatmulOp` 闭源改不了**：不依赖它，用 Pallas 自己写：TensorCore 的 host-DMA gather（冷数据）+ SparseCore 的
-   indirect gather（热数据）+ XLA 做后续的组合（sum/mean pooling 等）。
-7. 对照：vllm-torchtpu 里 DeepSeek-V4.1 的 Engram host 表现在是在 CPU 上用 numba gather 再拷到 TPU
-   （`models/vllm/deepseek_v41/common/engram.py` 的 `gather_raw` + `host_gather.py`），也就是题目里想避免的"CPU 改造"方式；
-   换成 host-DMA kernel 后可以去掉这段 CPU 开销（表要按上面的块粒度组织）。
+  v6e 每颗芯片的 PCIe 约 32 GB/s 单向（知识库 `wiki/concepts/pcie.md`）。
 
 ---
 
-## 第三部分：JIT 运行 / C++ 接口 / AOT 与 StableHLO —— 都能接
+## 第三部分：JIT 运行 / C++ 接口 / AOT 与 StableHLO
 
 | 文件 | 内容 |
 |---|---|
