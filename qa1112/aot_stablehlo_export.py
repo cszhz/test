@@ -12,7 +12,7 @@
 4. 写出 StableHLO bytecode（model.stablehlo.mlirbc）和 XLA 编译选项（compile_options.pb），
    给 C++ 通过 PJRT C API 加载 libtpu.so 执行（见 pjrt_run_stablehlo.cc）。
 
-示例模型：y = rmsnorm_pallas(x + r) @ W（RmsNorm 用 rmsnorm.py 里的 Pallas kernel）。
+示例模型：y = rmsnorm_pallas(x + r) @ W（RmsNorm 是本文件里的 Pallas kernel：fused residual-add + RmsNorm）。
 
 运行
   任何机器（导出 TPU 产物，不需要 TPU）：JAX_PLATFORMS=cpu python aot_stablehlo_export.py --out artifacts
@@ -20,23 +20,43 @@
 """
 
 import argparse
-import importlib.util
+import functools
 import pathlib
 
 import jax
 import jax.numpy as jnp
 from jax import export as jexport
+from jax.experimental import pallas as pl
 
-_spec = importlib.util.spec_from_file_location(
-    "rmsnorm", pathlib.Path(__file__).with_name("rmsnorm.py"))
-rmsnorm = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(rmsnorm)
+EPS = 1e-6
+
+
+def _residual_rmsnorm_kernel(x_ref, r_ref, w_ref, out_ref, new_r_ref):
+    h = x_ref[...].astype(jnp.float32) + r_ref[...].astype(jnp.float32)
+    inv = jax.lax.rsqrt(jnp.mean(h * h, axis=-1, keepdims=True) + EPS)
+    out_ref[...] = (h * inv * w_ref[...].astype(jnp.float32)).astype(out_ref.dtype)
+    new_r_ref[...] = h.astype(new_r_ref.dtype)
+
+
+@functools.partial(jax.jit, static_argnames="block_rows")
+def residual_rmsnorm_pallas(x, residual, weight, *, block_rows=512):
+    """返回 (rmsnorm(x + residual) * weight, x + residual)。按行分块，hidden 在 lane 上，fp32 里做平方和与 rsqrt。"""
+    tokens, hidden = x.shape
+    row_spec = pl.BlockSpec((block_rows, hidden), lambda i: (i, 0))
+    return pl.pallas_call(
+        _residual_rmsnorm_kernel,
+        grid=(tokens // block_rows,),
+        in_specs=[row_spec, row_spec, pl.BlockSpec((1, hidden), lambda i: (0, 0))],
+        out_specs=[row_spec, row_spec],
+        out_shape=[jax.ShapeDtypeStruct(x.shape, x.dtype)] * 2,
+    )(x, residual, weight.reshape(1, hidden))
+
 
 TOKENS, HIDDEN, OUT = 4096, 512, 1024
 
 
 def model(x, r, w_norm, w_proj):
-    h, _ = rmsnorm.residual_rmsnorm_pallas(x, r, w_norm, block_rows=512)
+    h, _ = residual_rmsnorm_pallas(x, r, w_norm, block_rows=512)
     return jnp.dot(h, w_proj, preferred_element_type=jnp.float32).astype(x.dtype)
 
 

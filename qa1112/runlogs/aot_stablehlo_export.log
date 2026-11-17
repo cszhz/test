@@ -1,6 +1,6 @@
 导出平台 ('tpu',)，调用约定 v10
 输入 ['bfloat16[4096,512]', 'bfloat16[4096,512]', 'bfloat16[512]', 'bfloat16[512,1024]'] -> 输出 ['bfloat16[4096,1024]']
-StableHLO 文本 6.9 KB，bytecode 5.1 KB，序列化 Exported 6.0 KB
+StableHLO 文本 6.9 KB，bytecode 5.0 KB，序列化 Exported 5.9 KB
 含 Pallas kernel（tpu_custom_call）：True
 反序列化后平台 ('tpu',)，输入数 4
 已写 compile_options.pb（xla.CompileOptionsProto）
