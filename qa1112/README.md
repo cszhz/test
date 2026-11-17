@@ -1,7 +1,6 @@
 # TPU 问答（2026-11-12）：host 内存乱序 gather、JIT / C++ / AOT 与 StableHLO
 
-环境：JAX 0.11.2 / libtpu 0.0.50。本机用 `source env.sh`：设 `$PY`（venv `/disk/venvs/qa1112-jax`），并把进程限定在 2 号芯片
-（本机其余芯片有服务在跑）；独占 TPU 机器时可不 source，自己设 `PY`。
+环境：JAX 0.11.2 / libtpu 0.0.50。
 
 | 文件 | 内容 |
 |---|---|
@@ -12,6 +11,31 @@
 | `runlogs/` | TPU 实测日志 |
 | `pylib/` | 序列化 `Exported` 需要的 flatbuffers |
 | `third_party/` | PJRT C API 头文件 |
+| `env.sh` | 只在多个进程分芯片用时需要：把进程限定在单颗芯片（2 号）并设 `$PY`；独占 TPU 机器不用 |
+
+## 运行
+
+在 `qa1112/` 目录下执行；C++ 运行时 TPU 不能被别的进程占用，以下命令按顺序跑。
+
+```bash
+git clone https://github.com/cszhz/test.git && cd test/qa1112
+
+# 环境（flatbuffers 已在 ./pylib 里；装出来的 libtpu 不是 0.0.50 时另外指定 libtpu==0.0.50）
+python3 -m venv .venv && .venv/bin/pip install "jax[tpu]==0.11.2" numpy
+PY=.venv/bin/python
+LIBTPU=$($PY -c "import libtpu, os; print(os.path.join(os.path.dirname(libtpu.__file__), 'libtpu.so'))")
+
+# 第二部分：host 内存乱序 gather
+PYTHONPATH=pylib $PY host_gather_pallas.py                                   # TPU 上执行并校验
+PYTHONPATH=pylib JAX_PLATFORMS=cpu $PY host_gather_pallas.py --export-only   # 只导出检查，不需要 TPU
+
+# 第三部分：JIT / AOT / StableHLO 导出 + C++ 执行
+PYTHONPATH=pylib JAX_PLATFORMS=cpu $PY aot_stablehlo_export.py --out artifacts  # 只导出，不需要 TPU
+PYTHONPATH=pylib $PY aot_stablehlo_export.py --out artifacts     # TPU 上导出，并对比 jit / AOT / 反序列化三种执行
+clang++-18 -O2 -std=c++17 -I third_party pjrt_run_stablehlo.cc -ldl -o pjrt_run_stablehlo   # 可直接用已编好的二进制
+./pjrt_run_stablehlo $LIBTPU artifacts                           # C++ 经 PJRT 在 TPU 上执行
+$PY check_cpp_vs_jax.py                                          # 核对：mean|y| 应与 C++ 打印的一致
+```
 
 ## 第二部分：Embedding 大表在 host 内存、乱序下标 gather
 
@@ -80,18 +104,7 @@ TPU 上实测（2026-11-17，v6e，JAX 0.11.2 / libtpu 0.0.50）：
 | `artifacts/`（运行后生成，不入库） | `model.stablehlo.mlir`（文本）、`.mlirbc`（bytecode）、`model.jax_exported`（序列化 Exported）、`compile_options.pb` |
 | `check_cpp_vs_jax.py` | 用 libc `srand(0)/rand()` 逐位重建 C++ 的输入，在 JAX 里跑同一模型，核对 C++ 输出 |
 
-```bash
-cd ~/temu && source env.sh
-# 只导出（任何机器，不需要 TPU；序列化需要 flatbuffers，已装在 ./pylib）
-PYTHONPATH=pylib JAX_PLATFORMS=cpu $PY aot_stablehlo_export.py --out artifacts
-# TPU 上：Python 侧执行并对比 jit / AOT / 反序列化三种结果
-PYTHONPATH=pylib $PY aot_stablehlo_export.py --out artifacts
-# C++：编译（已编好 ./pjrt_run_stablehlo）并在 TPU 上运行（不能和别的进程同时占同一颗芯片）
-clang++-18 -O2 -std=c++17 -I third_party pjrt_run_stablehlo.cc -ldl -o pjrt_run_stablehlo
-./pjrt_run_stablehlo /disk/venvs/qa1112-jax/lib/python3.12/site-packages/libtpu/libtpu.so artifacts
-# 核对 C++ 输出（mean|y| 应与 C++ 打印的一致）
-$PY check_cpp_vs_jax.py
-```
+运行命令见上面的"运行"。
 
 **验证状态**：CPU 上导出 TPU 版 StableHLO 成功（模块含 Pallas 的 `stablehlo.custom_call @tpu_custom_call`），
 序列化/反序列化成功；C++ 示例 `-Wall` 编译通过。
