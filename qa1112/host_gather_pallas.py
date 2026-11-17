@@ -5,19 +5,14 @@ TPU 版：Pallas TensorCore kernel 的输入放在 pl.HOST 内存空间（数组
        kernel 用 DMA 引擎经 PCIe 把 table 里的数据拷到 HBM 输出，同时保持多个 DMA 在途；不经过 CPU。
        下标通过 scalar prefetch 放进 SMEM。
 
-TPU 实测的限制（v6e，JAX 0.11.2 / libtpu 0.0.50）
-- 偏移是运行时下标时，host 数组每行（最内维）必须是 4 KiB 的整数倍，且一次取对齐的 8 行（一个 (8,128) tile 的高度）：
-  单次 DMA 最少 8 x 4 KiB = 32 KiB。不满足时编译报
-  "LLO_CHECK multiplier_in_bytes % word_size == 0 (512 4096)"（单行 / 行宽 512 B 等都是这个错）。
-  静态偏移（编译期常量）没有这个限制。
-- 所以 512 B 的 embedding 行不能逐行从 host 取。本脚本演示可行的形态：表按"块"组织（每块 GROUP 行 x 行宽 >= 4 KiB），
-  按乱序块下标取块。用 --mode row 可复现逐行取的编译失败。
+块粒度（TPU 实测，v6e，JAX 0.11.2 / libtpu 0.0.50）
+- 偏移是运行时下标时，host 数组每行（最内维）取 4 KiB 的整数倍，一次取对齐的 8 行（一个 (8,128) tile 的高度），
+  即每块 8 x 4 KiB = 32 KiB。表按"块"组织（每块 GROUP 行），按乱序块下标取块。
 - SparseCore 的 Pallas lowering 不支持 host 内存，SparseCore 只能 gather HBM 里的表（适合热点部分）。
 
 运行
   导出检查（任意机器）：PYTHONPATH=pylib JAX_PLATFORMS=cpu python host_gather_pallas.py --export-only
   TPU 上执行并校验：python host_gather_pallas.py [--blocks 16384 --group 8 --dim 1024 --n 2048]
-  复现逐行取失败：python host_gather_pallas.py --mode row
 """
 
 import argparse
@@ -37,7 +32,7 @@ IN_FLIGHT = 32          # 同时在途的 DMA 数
 def _gather_kernel(idx_ref, table_ref, out_ref, sems, *, group):
     """idx_ref: SMEM i32[n]；table_ref: HOST [blocks*group, dim]；out_ref: HBM [n*group, dim]。
 
-    第 i 个 DMA 把第 idx[i] 块（group 行）拷到输出的第 i 块；group=1 即逐行取（目前编译不过，见文件头）。"""
+    第 i 个 DMA 把第 idx[i] 块（group 行）拷到输出的第 i 块。"""
     n = idx_ref.shape[0]
 
     def rows(k):
@@ -76,16 +71,13 @@ def host_gather(table_host, indices, group=8):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["block", "row"], default="block")
     ap.add_argument("--blocks", type=int, default=16384)
     ap.add_argument("--group", type=int, default=8)       # 每块行数（8 的倍数）
     ap.add_argument("--dim", type=int, default=1024)      # f32 x 1024 = 4 KiB / 行；块 = 32 KiB
     ap.add_argument("--n", type=int, default=2048)        # 取多少块
     ap.add_argument("--export-only", action="store_true")
     args = ap.parse_args()
-    if args.mode == "row":                                # 原始需求：表 [4M, 256] bf16，逐行（512 B）取
-        args.blocks, args.group, args.dim, args.n = 4 * 1024 * 1024, 1, 256, 65536
-    dtype = jnp.bfloat16 if args.mode == "row" else jnp.float32
+    dtype = jnp.float32
     rows = args.blocks * args.group
 
     if args.export_only:
