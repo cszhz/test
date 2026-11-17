@@ -9,7 +9,6 @@
 | `aot_stablehlo_export.py` | 第三部分：JIT / AOT / `jax.export` 导出 StableHLO（示例模型带 Pallas kernel） |
 | `pjrt_run_stablehlo.cc`、`pjrt_run_stablehlo` | 第三部分：C++ 经 PJRT C API 加载 libtpu.so 编译并执行导出的 StableHLO |
 | `check_cpp_vs_jax.py` | 第三部分：逐位重建 C++ 的输入，在 JAX 里核对 C++ 的输出 |
-| `artifacts/`、`artifacts_tpu/` | 在 CPU / TPU 上导出的产物 |
 | `runlogs/` | TPU 实测日志 |
 | `pylib/` | 序列化 `Exported` 需要的 flatbuffers |
 | `third_party/` | PJRT C API 头文件 |
@@ -63,19 +62,18 @@ TPU 上实测（2026-11-17，v6e，JAX 0.11.2 / libtpu 0.0.50；下面的限制�
 | `aot_stablehlo_export.py` | JIT、AOT（`lower().compile()`）、`jax.export` 导出 StableHLO 并序列化/反序列化执行；可在 CPU 机器上导出 TPU 产物 |
 | `pjrt_run_stablehlo.cc` | C++ 通过 PJRT C API（`dlopen libtpu.so` → `GetPjrtApi`）编译并执行导出的 StableHLO |
 | `third_party/xla/pjrt/c/pjrt_c_api.h` | PJRT C API 头文件（v0.116，来自本机 tpu-sync 编译用的 XLA） |
-| `artifacts/` | CPU 上导出的产物：`model.stablehlo.mlir`（文本）、`.mlirbc`（bytecode）、`model.jax_exported`（序列化 Exported）、`compile_options.pb` |
-| `artifacts_tpu/` | TPU 上导出的同一套产物（C++ 实测用的这份） |
+| `artifacts/`（运行后生成，不入库） | `model.stablehlo.mlir`（文本）、`.mlirbc`（bytecode）、`model.jax_exported`（序列化 Exported）、`compile_options.pb` |
 | `check_cpp_vs_jax.py` | 用 libc `srand(0)/rand()` 逐位重建 C++ 的输入，在 JAX 里跑同一模型，核对 C++ 输出 |
 
 ```bash
 cd ~/temu && source env.sh
-# 导出（任何机器；序列化需要 flatbuffers，已装在 ./pylib）
+# 只导出（任何机器，不需要 TPU；序列化需要 flatbuffers，已装在 ./pylib）
 PYTHONPATH=pylib JAX_PLATFORMS=cpu $PY aot_stablehlo_export.py --out artifacts
 # TPU 上：Python 侧执行并对比 jit / AOT / 反序列化三种结果
-PYTHONPATH=pylib $PY aot_stablehlo_export.py --out artifacts_tpu
+PYTHONPATH=pylib $PY aot_stablehlo_export.py --out artifacts
 # C++：编译（已编好 ./pjrt_run_stablehlo）并在 TPU 上运行（不能和别的进程同时占同一颗芯片）
 clang++-18 -O2 -std=c++17 -I third_party pjrt_run_stablehlo.cc -ldl -o pjrt_run_stablehlo
-./pjrt_run_stablehlo /disk/venvs/qa1112-jax/lib/python3.12/site-packages/libtpu/libtpu.so artifacts_tpu
+./pjrt_run_stablehlo /disk/venvs/qa1112-jax/lib/python3.12/site-packages/libtpu/libtpu.so artifacts
 # 核对 C++ 输出（mean|y| 应与 C++ 打印的一致）
 $PY check_cpp_vs_jax.py
 ```
