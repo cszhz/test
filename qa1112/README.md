@@ -19,6 +19,47 @@
 |---|---|
 | `host_gather_pallas.py` | 表放在 host pinned 内存（`memory_kind="pinned_host"`），Pallas TensorCore kernel 用 `pl.HOST` 内存空间直接 DMA 按乱序下标取数据到 HBM，不经过 CPU。按对齐块取（见下） |
 
+**用到的 API**
+
+| 步骤 | API |
+|---|---|
+| 表放进 host pinned 内存 | `jax.device_put(table, jax.sharding.SingleDeviceSharding(dev, memory_kind="pinned_host"))` |
+| 下标放进 SMEM（kernel 里用标量读） | `pl.pallas_call(..., grid_spec=pltpu.PrefetchScalarGridSpec(num_scalar_prefetch=1, ...))`，下标作为第一个参数 |
+| kernel 直接拿到 host 上的表（不整表拷到 HBM） | `in_specs=[pl.BlockSpec(memory_space=pl.HOST)]` |
+| 输出留在 HBM、由 kernel 自己 DMA 写 | `out_specs=pl.BlockSpec(memory_space=pl.ANY)` |
+| 按下标发 DMA：host → HBM | `pltpu.make_async_copy(src_ref.at[...], dst_ref.at[...], sem)`，`.start()` / `.wait()` |
+| DMA 信号量（多个 DMA 同时在途） | `scratch_shapes=[pltpu.SemaphoreType.DMA((IN_FLIGHT,))]` |
+| 对齐提示 | `pl.multiple_of(k * group, group)` |
+
+```python
+def kernel(idx_ref, table_ref, out_ref, sems):        # idx: SMEM，table: HOST，out: HBM
+    def copy(i):
+        src = table_ref.at[pl.ds(pl.multiple_of(idx_ref[i] * G, G), G)]   # 第 idx[i] 块
+        dst = out_ref.at[pl.ds(pl.multiple_of(i * G, G), G)]              # 输出第 i 块
+        return pltpu.make_async_copy(src, dst, sems.at[i % IN_FLIGHT])
+
+    @pl.loop(0, n)
+    def _(i):
+        @pl.when(i >= IN_FLIGHT)
+        def _():
+            copy(i - IN_FLIGHT).wait()     # 复用信号量前等最早的那个完成
+        copy(i).start()
+
+    @pl.loop(n - IN_FLIGHT, n)
+    def _(i):
+        copy(i).wait()
+
+out = pl.pallas_call(
+    kernel,
+    grid_spec=pltpu.PrefetchScalarGridSpec(
+        num_scalar_prefetch=1, grid=(1,),
+        in_specs=[pl.BlockSpec(memory_space=pl.HOST)],
+        out_specs=pl.BlockSpec(memory_space=pl.ANY),
+        scratch_shapes=[pltpu.SemaphoreType.DMA((IN_FLIGHT,))]),
+    out_shape=jax.ShapeDtypeStruct((n * G, dim), table.dtype),
+)(indices, table_host)
+```
+
 **验证状态**：CPU 上导出 TPU 版 StableHLO 成功：表参数标为 `mhlo.memory_kind="pinned_host"`，直接作为 `tpu_custom_call` 的输入，
 中间没有整表拷贝（TPU 上编译后的 HLO 也确认没有拷贝）。
 
